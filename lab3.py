@@ -12,35 +12,58 @@ import torchvision.transforms as transforms
 import torchvision.models as models
 
 import copy
+import argparse
+import os
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # desired size of the output image
 # imsize = 512 if torch.cuda.is_available() else 128  # use small size if no gpu
+
 imsize = 512
+# imdim = (1280,720)
 
 loader = transforms.Compose([
     transforms.Resize(imsize),  # scale imported image
     transforms.ToTensor()])  # transform it into a torch tensor
 
+unloader = transforms.ToPILImage()  # reconvert into PIL image
 
-def image_loader(image_name):
+cnn = models.vgg19(pretrained=True).features.to(device).eval()
+cnn_normalization_mean = torch.tensor([0.485, 0.456, 0.406]).to(device)
+cnn_normalization_std = torch.tensor([0.229, 0.224, 0.225]).to(device)
+
+# desired depth layers to compute style/content losses :
+content_layers_default = ['conv_4']
+style_layers_default = ['conv_1', 'conv_2', 'conv_3', 'conv_4', 'conv_5']
+style_w = {'conv_1': 0.75,
+      'conv_2': 0.5,
+      'conv_3': 0.2,
+      'conv_4': 0.2,
+      'conv_5': 0.2}
+
+
+def image_loader(image_name,image_dim=None):
     image = Image.open(image_name)
     # fake batch dimension required to fit network's input dimensions
-    image = image.resize((imsize,imsize))
+    if (image_dim):
+      image = image.resize(image_dim)
+    else:
+      image = image.resize((imsize,imsize))
     image = loader(image).unsqueeze(0)
     return image.to(device, torch.float)
 
 
-style_img = image_loader("./images/StarryNight.jpg")
-content_img = image_loader("./images/Hogwarts.jpg")
+# style_img = image_loader("circle1.jpg")
+# content_img = image_loader("lastsupper.jpg")
+
+# style_img = image_loader("circle1.jpg")
+# content_img = image_loader("lastsupper.jpg")
+
 
 # assert style_img.size() == content_img.size(), \
-    # "we need to import style and content images of the same size"
+#     "we need to import style and content images of the same size"
 
-unloader = transforms.ToPILImage()  # reconvert into PIL image
-
-plt.ion()
 
 def imshow(tensor, title=None):
     image = tensor.cpu().clone()  # we clone the tensor to not do changes on it
@@ -52,11 +75,11 @@ def imshow(tensor, title=None):
     plt.pause(0.001) # pause a bit so that plots are updated
 
 
-plt.figure()
-imshow(style_img, title='Style Image')
+# plt.figure()
+# imshow(style_img, title='Style Image')
 
-plt.figure()
-imshow(content_img, title='Content Image')
+# plt.figure()
+# imshow(content_img, title='Content Image')
 
 class ContentLoss(nn.Module):
 
@@ -87,18 +110,16 @@ def gram_matrix(input):
 
 class StyleLoss(nn.Module):
 
-    def __init__(self, target_feature):
+    def __init__(self, target_feature,sw):
         super(StyleLoss, self).__init__()
         self.target = gram_matrix(target_feature).detach()
+        # print(sw)
+        self.sw = sw
 
     def forward(self, input):
         G = gram_matrix(input)
-        self.loss = F.mse_loss(G, self.target)
+        self.loss = self.sw * F.mse_loss(G, self.target)
         return input
-
-cnn = models.vgg19(pretrained=True).features.to(device).eval()
-cnn_normalization_mean = torch.tensor([0.485, 0.456, 0.406]).to(device)
-cnn_normalization_std = torch.tensor([0.229, 0.224, 0.225]).to(device)
 
 # create a module to normalize input image so we can easily put it in a
 # nn.Sequential
@@ -115,15 +136,10 @@ class Normalization(nn.Module):
         # normalize img
         return (img - self.mean) / self.std
 
-
-# desired depth layers to compute style/content losses :
-content_layers_default = ['conv_4']
-style_layers_default = ['conv_1', 'conv_2', 'conv_3', 'conv_4', 'conv_5']
-
 def get_style_model_and_losses(cnn, normalization_mean, normalization_std,
                                style_img, content_img,
                                content_layers=content_layers_default,
-                               style_layers=style_layers_default):
+                               style_layers=style_layers_default,style_weights=style_w):
     cnn = copy.deepcopy(cnn)
 
     # normalization module
@@ -168,7 +184,7 @@ def get_style_model_and_losses(cnn, normalization_mean, normalization_std,
         if name in style_layers:
             # add style loss:
             target_feature = model(style_img).detach()
-            style_loss = StyleLoss(target_feature)
+            style_loss = StyleLoss(target_feature,style_w[name])
             model.add_module("style_loss_{}".format(i), style_loss)
             style_losses.append(style_loss)
 
@@ -182,13 +198,13 @@ def get_style_model_and_losses(cnn, normalization_mean, normalization_std,
     return model, style_losses, content_losses
 
 
-input_img = content_img.clone()
+
 # if you want to use white noise instead uncomment the below line:
 # input_img = torch.randn(content_img.data.size(), device=device)
 
 # add the original input image to the figure:
-plt.figure()
-imshow(input_img, title='Input Image')
+# plt.figure()
+# imshow(input_img, title='Input Image')
 
 def get_input_optimizer(input_img):
     # this line to show that input is a parameter that requires a gradient
@@ -233,8 +249,7 @@ def run_style_transfer(cnn, normalization_mean, normalization_std,
                 print("run {}:".format(run))
                 print('Style Loss : {:4f} Content Loss: {:4f}'.format(
                     style_score.item(), content_score.item()))
-                print()
-
+                print()                  
             return style_score + content_score
 
         optimizer.step(closure)
@@ -244,12 +259,100 @@ def run_style_transfer(cnn, normalization_mean, normalization_std,
 
     return input_img
 
-output = run_style_transfer(cnn, cnn_normalization_mean, cnn_normalization_std,
-                            content_img, style_img, input_img)
+# output = run_style_transfer(cnn, cnn_normalization_mean, cnn_normalization_std,
+#                             content_img, style_img, input_img,num_steps=500)
 
-plt.figure()
-imshow(output, title='Output Image')
+# plt.figure()
+# imshow(output, title='Output Image')
 
-# sphinx_gallery_thumbnail_number = 4
-plt.ioff()
-plt.show()
+# output_img = output.squeeze(0)      # remove the fake batch dimension
+# output_img = unloader(output_img)
+# output_img.save("output_lastsupper_circles1.jpg")
+
+def main():
+    
+    def evaluate_content_path(arg):
+        if (os.path.exists(arg)):
+            return arg
+        else:
+            raise argparse.ArgumentTypeError('The content path does not exist\n')
+
+
+    def evaluate_style_path(arg):
+        if (os.path.exists(arg)):
+            return arg
+        else:
+            raise argparse.ArgumentTypeError('The style path does not exist\n')
+
+    def evaluate_epochs_arg(arg):
+        if (int(arg) > 0):
+            return arg
+        else:
+            raise argparse.ArgumentTypeError("The number of epochs specified was less than or equal to 0.\n")
+
+    parser = argparse.ArgumentParser(description='Options to run lab3')
+    parser.add_argument('-s','--style_image_path', type=evaluate_style_path,
+                    help='Path to style image\n')
+    
+    parser.add_argument('-c','--content_image_path', type=evaluate_content_path,
+                    help="Path to content image\n")
+    
+    parser.add_argument('-e','--epochs',type=evaluate_epochs_arg,help="Number of epochs. Must be greater than 0.")
+
+    parser.add_argument('-v','--view_before_saving', type=bool,
+                    help="True or False. True for displaying styled transfer image after every 50 epochs and having the option to save. (Note: epoch argument will be ignored). False for saving after the specified number of epochs.\n")
+    
+    args = parser.parse_args()
+
+    # if not (any(vars(args).values())):
+    #     parser.error('One or more of these arguments were not supplied: -s or --style_image_path and -c or --content_image_path and -e or --epochs and -v or --view_before_saving. Please use --help for more information.')
+
+    if (not args.style_image_path):
+        parser.error("Error: Style image path not supplied. Please use --help for more information.")
+    if (not args.content_image_path):
+        parser.error("Error: Content image path not supplied. Please use --help for more information.")
+    if (args.view_before_saving == None and args.epochs == None):
+        parser.error("Error: Neither Epochs nor View Before Saving was specified. Please use --help for more information.")
+
+
+    style_img = image_loader(args.style_image_path)
+    content_img = image_loader(args.content_image_path)
+
+    assert style_img.size() == content_img.size(), \
+        "we need to import style and content images of the same size"
+    plt.ion()
+
+    input_img = content_img.clone()
+    if (args.view_before_saving):
+        to_save = False
+        output = 1
+        while (not to_save):
+            output = run_style_transfer(cnn, cnn_normalization_mean, cnn_normalization_std,
+                                    content_img, style_img, input_img,num_steps=50)
+            plt.figure()
+            imshow(output, title='Output Image')
+            while (1):
+                response = input("Save the image as it is? yes or no\n")
+                if (response.lower() == "yes"):
+                    to_save = True
+                    break
+                elif (response.lower() == "no"):
+                    to_save = False
+                    break
+                else:
+                    print("Answer not recognized, asking again...")
+        output_img = output.squeeze(0)      # remove the fake batch dimension
+        output_img = unloader(output_img)
+        output_img_path = "./out/output_"+str(os.path.basename(args.content_image_path).split(".")[0])+"_"+str(os.path.basename(args.style_image_path).split(".")[0])+".jpg"
+        output_img.save(output_img_path)
+    else:
+        output = run_style_transfer(cnn, cnn_normalization_mean, cnn_normalization_std,
+                                    content_img, style_img, input_img,num_steps=int(args.epochs))
+        
+        output_img = output.squeeze(0)      # remove the fake batch dimension
+        output_img = unloader(output_img)
+        output_img_path = "./out/output_"+str(os.path.basename(args.content_image_path).split(".")[0])+"_"+str(os.path.basename(args.style_image_path).split(".")[0])+".jpg"
+        output_img.save(output_img_path)
+
+if __name__ == '__main__':
+    main()
